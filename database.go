@@ -41,12 +41,16 @@ type Entry struct {
 // Note: This is a very naive implementation that can benefit
 // a great deal from optimization.
 type Database struct {
-	Root    string   // Database root path.
-	Entries []*Entry // List of entries.
+	Root    string           // Database root path.
+	entries []*Entry         // List of entries.
+	pathMap map[string]int   //(private) map of file paths to Entry index
+	hashMap map[uint64][]int //(private) map of file hashes to Entry indexes
 }
 
 // NewDatabase creates a new, empty database.
-func NewDatabase() *Database { return new(Database) }
+func NewDatabase() *Database {
+	return &Database{pathMap: make(map[string]int), hashMap: make(map[uint64][]int)}
+}
 
 // Find finds all entries which have a Hamming Diance <= to the
 // specified distance with the given hash.
@@ -55,15 +59,29 @@ func (d *Database) Find(hash, distance uint64) ResultSet {
 	var rs ResultSet
 	var dist uint64
 
-	for _, e := range d.Entries {
-		dist = Distance(e.Hash, hash)
-
-		if dist <= distance {
+	//shortcut the enumeration and do a hash lookup if the distance is zero.
+	if 0 == dist {
+		for _, i := range d.hashMap[hash] {
 			rs = append(rs, &SearchResult{
-				Path:     e.Path,
-				Hash:     e.Hash,
-				Distance: dist,
+				Path:     d.entries[i].Path,
+				Hash:     d.entries[i].Hash,
+				Distance: 0,
 			})
+		}
+	} else {
+		for _, e := range d.entries {
+			if nil == e {
+				continue
+			}
+			dist = Distance(e.Hash, hash)
+
+			if dist <= distance {
+				rs = append(rs, &SearchResult{
+					Path:     e.Path,
+					Hash:     e.Hash,
+					Distance: dist,
+				})
+			}
 		}
 	}
 
@@ -132,10 +150,35 @@ func (d *Database) Load(file string) (err error) {
 			return
 		}
 
-		d.Entries = append(d.Entries, entry)
+		d.AddEntry(entry)
 	}
 
 	return
+}
+
+func (d *Database) AddEntry(entry *Entry) {
+	d.entries = append(d.entries, entry)
+	newIndex := len(d.entries) - 1
+	d.pathMap[entry.Path] = newIndex
+	d.hashMap[entry.Hash] = append(d.hashMap[entry.Hash], newIndex)
+}
+
+// Remove the entry without reshuffling the whole database.
+// Note this means the array may have nil elements
+func (d *Database) DeleteEntry(index int) {
+	entry := d.entries[index]
+	d.entries[index] = nil
+	delete(d.pathMap, entry.Path)
+
+	//there may be multiple entries with the same hash, so we rebuild the array
+	for i, e := range d.hashMap[entry.Hash] {
+		if e == index {
+			d.hashMap[entry.Hash][i] = d.hashMap[entry.Hash][len(d.hashMap[entry.Hash])-1]
+			d.hashMap[entry.Hash] = d.hashMap[entry.Hash][:len(d.hashMap[entry.Hash])-1]
+			break
+		}
+	}
+
 }
 
 // Save saves the database to the given file.
@@ -154,8 +197,10 @@ func (d *Database) Save(file string) (err error) {
 
 	fmt.Fprintf(fd, "%s\n", d.Root)
 
-	for _, e := range d.Entries {
-		fmt.Fprintf(fd, "%016x %015x %s\n", e.Hash, e.ModTime, e.Path)
+	for _, e := range d.entries {
+		if nil != e {
+			fmt.Fprintf(fd, "%016x %015x %s\n", e.Hash, e.ModTime, e.Path)
+		}
 	}
 
 	return
@@ -167,11 +212,11 @@ func (d *Database) Set(file string, modtime int64, hash uint64) {
 	index := d.IndexFile(file)
 
 	if index == -1 {
-		d.Entries = append(d.Entries, &Entry{file, hash, modtime})
+		d.AddEntry(&Entry{file, hash, modtime})
 		return
 	}
 
-	f := d.Entries[index]
+	f := d.entries[index]
 	f.ModTime = modtime
 	f.Hash = hash
 }
@@ -186,30 +231,21 @@ func (d *Database) IsNew(file string, modtime int64) bool {
 		return true
 	}
 
-	return d.Entries[index].ModTime != modtime
+	return d.entries[index].ModTime != modtime
 }
 
 // IndexFile returns the index for the given file.
 func (d *Database) IndexFile(file string) int {
-	for i, e := range d.Entries {
-		if e.Path == file {
-			return i
-		}
-	}
+	i, ok := d.pathMap[file]
 
-	return -1
+	if !ok {
+		return -1
+	}
+	return i
 }
 
 // IndexHash returns the indices for files with the given hash.
 // There can be more than one of them.
 func (d *Database) IndexHash(hash uint64) []int {
-	var list []int
-
-	for i, e := range d.Entries {
-		if e.Hash == hash {
-			list = append(list, i)
-		}
-	}
-
-	return list
+	return d.hashMap[hash]
 }
