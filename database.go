@@ -41,12 +41,13 @@ type Entry struct {
 // Note: This is a very naive implementation that can benefit
 // a great deal from optimization.
 type Database struct {
-	Root    string   // Database root path.
-	Entries []*Entry // List of entries.
+	Root    string         // Database root path.
+	entries []*Entry       // List of entries.
+	pathMap map[string]int //(private) map of file paths to Entry index
 }
 
 // NewDatabase creates a new, empty database.
-func NewDatabase() *Database { return new(Database) }
+func NewDatabase() *Database { return &Database{pathMap: make(map[string]int)} }
 
 // Find finds all entries which have a Hamming Diance <= to the
 // specified distance with the given hash.
@@ -55,7 +56,7 @@ func (d *Database) Find(hash, distance uint64) ResultSet {
 	var rs ResultSet
 	var dist uint64
 
-	for _, e := range d.Entries {
+	for _, e := range d.entries {
 		dist = Distance(e.Hash, hash)
 
 		if dist <= distance {
@@ -132,10 +133,23 @@ func (d *Database) Load(file string) (err error) {
 			return
 		}
 
-		d.Entries = append(d.Entries, entry)
+		d.AddEntry(entry)
 	}
 
 	return
+}
+
+func (d *Database) AddEntry(entry *Entry) {
+	d.entries = append(d.entries, entry)
+	d.pathMap[entry.Path] = len(d.entries) - 1
+}
+
+// Remove the entry without reshuffling the whole database.
+// Note this means the array may have nil elements
+func (d *Database) DeleteEntry(index int) {
+	entry := d.entries[index]
+	d.entries[index] = nil
+	delete(d.pathMap, entry.Path)
 }
 
 // Save saves the database to the given file.
@@ -154,7 +168,7 @@ func (d *Database) Save(file string) (err error) {
 
 	fmt.Fprintf(fd, "%s\n", d.Root)
 
-	for _, e := range d.Entries {
+	for _, e := range d.entries {
 		fmt.Fprintf(fd, "%016x %015x %s\n", e.Hash, e.ModTime, e.Path)
 	}
 
@@ -167,11 +181,11 @@ func (d *Database) Set(file string, modtime int64, hash uint64) {
 	index := d.IndexFile(file)
 
 	if index == -1 {
-		d.Entries = append(d.Entries, &Entry{file, hash, modtime})
+		d.AddEntry(&Entry{file, hash, modtime})
 		return
 	}
 
-	f := d.Entries[index]
+	f := d.entries[index]
 	f.ModTime = modtime
 	f.Hash = hash
 }
@@ -186,18 +200,17 @@ func (d *Database) IsNew(file string, modtime int64) bool {
 		return true
 	}
 
-	return d.Entries[index].ModTime != modtime
+	return d.entries[index].ModTime != modtime
 }
 
 // IndexFile returns the index for the given file.
 func (d *Database) IndexFile(file string) int {
-	for i, e := range d.Entries {
-		if e.Path == file {
-			return i
-		}
-	}
+	i, ok := d.pathMap[file]
 
-	return -1
+	if !ok {
+		return -1
+	}
+	return i
 }
 
 // IndexHash returns the indices for files with the given hash.
@@ -205,7 +218,7 @@ func (d *Database) IndexFile(file string) int {
 func (d *Database) IndexHash(hash uint64) []int {
 	var list []int
 
-	for i, e := range d.Entries {
+	for i, e := range d.entries {
 		if e.Hash == hash {
 			list = append(list, i)
 		}
