@@ -60,7 +60,7 @@ func (d *Database) Find(hash, distance uint64) ResultSet {
 	var dist uint64
 
 	//shortcut the enumeration and do a hash lookup if the distance is zero.
-	if 0 == dist {
+	if 0 == distance {
 		for _, i := range d.hashMap[hash] {
 			rs = append(rs, &SearchResult{
 				Path:     d.entries[i].Path,
